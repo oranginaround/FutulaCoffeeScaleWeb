@@ -297,6 +297,39 @@ function App() {
   const currentWeightRef = useRef(0)
   const animFrame = useRef(null)
   const runningRef = useRef(false)
+  const wakeLock = useRef(null)
+
+  // Keep screen awake while connected
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock.current = await navigator.wakeLock.request('screen')
+        wakeLock.current.addEventListener('release', () => {
+          wakeLock.current = null
+        })
+      }
+    } catch (e) {
+      // Wake lock request failed (e.g. low battery)
+    }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock.current) {
+      wakeLock.current.release()
+      wakeLock.current = null
+    }
+  }
+
+  // Re-acquire wake lock when page becomes visible again
+  useEffect(() => {
+    function handleVisibility() {
+      if (document.visibilityState === 'visible' && running) {
+        requestWakeLock()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [running])
 
   // Keep runningRef in sync
   useEffect(() => {
@@ -339,12 +372,14 @@ function App() {
     }, 200)
     setRunning(true)
     setShowTimerReset(false)
+    requestWakeLock()
   }, [running, elapsed])
 
   const stopTimer = useCallback(() => {
     if (!running) return
     clearInterval(timerInterval.current)
     setRunning(false)
+    releaseWakeLock()
   }, [running])
 
   const resetTimer = useCallback(() => {
@@ -353,6 +388,7 @@ function App() {
     setElapsed(0)
     setShowTimerReset(false)
     setChartData([])
+    releaseWakeLock()
   }, [])
 
   useEffect(() => {
@@ -444,7 +480,7 @@ function App() {
       </div>
 
       {/* Scale section - 3/4 */}
-      <div style={styles.scaleSection} onClick={() => setShowModal(true)}>
+      <div style={styles.scaleSection} onClick={() => connected && setShowModal(true)}>
         {/* Chart behind weight */}
         <WeightChart
           data={chartData}
@@ -480,7 +516,8 @@ function App() {
         </button>
         <button
           onClick={running ? stopTimer : startTimer}
-          style={{ ...styles.btn, background: running ? '#ef4444' : '#22c55e' }}
+          disabled={!connected}
+          style={{ ...styles.btn, background: running ? '#ef4444' : '#22c55e', opacity: connected ? 1 : 0.4 }}
         >
           {running ? 'Stop' : 'Start'}
         </button>

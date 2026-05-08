@@ -1,16 +1,28 @@
-# React + Vite
+# Futula Coffee Scale Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A BLE coffee scale companion app with timer and pour-over tracking. Installable as a PWA on Android.
 
-Currently, two official plugins are available:
+Based on [FutulaCoffeeScale](https://github.com/wdrs/FutulaCoffeeScale) by wdrs, but fully rewritten in JavaScript (React) and works as a web app — no native build required.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- Connect to LFSmart / LEFU-CK811 BLE scales
+- Real-time weight display with smooth interpolation
+- Software tare
+- Timer with start/stop/reset
+- Target weight selection with pour-over guide lines (bloom, split-in-fives)
+- Live weight/time chart during brewing
+- Installable as a PWA (Android Chrome)
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Run locally
 
-## Expanding the ESLint configuration
+```bash
+yarn install
+yarn dev
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Deploy
+
+Pushes to `main` auto-deploy to GitHub Pages via Actions.
+
+Live at: https://oranginaround.github.io/FutulaCoffeeScaleWeb/
