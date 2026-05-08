@@ -6,20 +6,16 @@ const CHAR_WEIGHT = '0000fff4-0000-1000-8000-00805f9b34fb'
 const RESET_CMD = new Uint8Array([0xfd, 0x32, 0, 0, 0, 0, 0, 0, 0, 0, 0xcf])
 
 const PRESET_WEIGHTS = [500, 350, 250]
+const BLOOM_DURATION = 45000 // 45 seconds in ms
+const TOTAL_BREW_TIME = 105000 // 1:45 in ms (total pouring time)
+const FIFTHS_INTERVAL = 15000 // 15 seconds per pour in fifths mode
+const FLOW_TOLERANCE = 2.5 // +/- ml/s window for ideal flow
 
 function formatTime(ms) {
   const totalSeconds = Math.floor(ms / 1000)
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
-}
-
-function formatTimeShort(ms) {
-  const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  if (minutes > 0) return `${minutes}:${seconds.toString().padStart(2, '0')}`
-  return `${seconds}s`
 }
 
 // --- Chart Component ---
@@ -59,7 +55,8 @@ function WeightChart({ data, goalWeight, splitInFives }) {
   }
 
   const maxWeight = goalWeight * 1.1
-  const maxTime = data.length > 0 ? Math.max(data[data.length - 1].time, 30000) : 30000
+  const lastTime = data.length > 0 ? data[data.length - 1].time : 0
+  const maxTime = lastTime > TOTAL_BREW_TIME ? lastTime : TOTAL_BREW_TIME
   const { w, h } = size
   const pad = { top: 10, bottom: 10, left: 10, right: 10 }
   const chartW = w - pad.left - pad.right
@@ -113,6 +110,32 @@ function WeightChart({ data, goalWeight, splitInFives }) {
               strokeLinecap="round"
             />
           )}
+          {/* Vertical time markers */}
+          {[
+            { time: BLOOM_DURATION, label: '0:45' },
+            { time: TOTAL_BREW_TIME, label: '1:45' },
+          ].map((marker, i) => {
+            const x = pad.left + (marker.time / maxTime) * chartW
+            return (
+              <g key={`vline-${i}`}>
+                <line
+                  x1={x} y1={pad.top} x2={x} y2={h - pad.bottom}
+                  stroke="rgba(255,255,255,0.12)"
+                  strokeWidth="1"
+                  strokeDasharray="4,4"
+                />
+                <text
+                  x={x - 3} y={h - pad.bottom - 4}
+                  fill="rgba(255,255,255,0.3)"
+                  fontSize="10"
+                  fontFamily="system-ui, sans-serif"
+                  textAnchor="end"
+                >
+                  {marker.label}
+                </text>
+              </g>
+            )
+          })}
         </svg>
       )}
     </div>
@@ -288,14 +311,13 @@ function App() {
   const [goalWeight, setGoalWeight] = useState(500)
   const [splitInFives, setSplitInFives] = useState(false)
   const [chartData, setChartData] = useState([])
+  const [flowRate, setFlowRate] = useState(0)
   const commandChar = useRef(null)
   const timerStart = useRef(null)
   const timerInterval = useRef(null)
   const rawWeight = useRef(0)
   const tareOffset = useRef(0)
-  const targetWeightRef = useRef(0)
-  const currentWeightRef = useRef(0)
-  const animFrame = useRef(null)
+  const displayWeightRef = useRef(0)
   const runningRef = useRef(false)
   const wakeLock = useRef(null)
 
@@ -336,27 +358,6 @@ function App() {
     runningRef.current = running
   }, [running])
 
-  useEffect(() => {
-    let lastTime = performance.now()
-
-    function animate(now) {
-      const dt = (now - lastTime) / 1000
-      lastTime = now
-      const diff = targetWeightRef.current - currentWeightRef.current
-      const speed = 12
-      if (Math.abs(diff) < 0.05) {
-        currentWeightRef.current = targetWeightRef.current
-      } else {
-        currentWeightRef.current += diff * Math.min(speed * dt, 1)
-      }
-      setDisplayWeight(currentWeightRef.current)
-      animFrame.current = requestAnimationFrame(animate)
-    }
-
-    animFrame.current = requestAnimationFrame(animate)
-    return () => cancelAnimationFrame(animFrame.current)
-  }, [])
-
   const startTimer = useCallback(() => {
     if (running) return
     timerStart.current = Date.now() - elapsed
@@ -364,11 +365,25 @@ function App() {
       const now = Date.now()
       const currentElapsed = now - timerStart.current
       setElapsed(currentElapsed)
+      const currentW = displayWeightRef.current
       // Record chart data point
-      setChartData((prev) => [
-        ...prev,
-        { time: currentElapsed, weight: currentWeightRef.current },
-      ])
+      setChartData((prev) => {
+        const next = [...prev, { time: currentElapsed, weight: currentW }]
+        // Calculate flow rate from last ~2 seconds of data
+        if (next.length >= 2) {
+          const windowStart = currentElapsed - 2000
+          const recent = next.filter((p) => p.time >= windowStart)
+          if (recent.length >= 2) {
+            const first = recent[0]
+            const last = recent[recent.length - 1]
+            const dt = (last.time - first.time) / 1000
+            if (dt > 0) {
+              setFlowRate((last.weight - first.weight) / dt)
+            }
+          }
+        }
+        return next
+      })
     }, 200)
     setRunning(true)
     setShowTimerReset(false)
@@ -388,6 +403,7 @@ function App() {
     setElapsed(0)
     setShowTimerReset(false)
     setChartData([])
+    setFlowRate(0)
     releaseWakeLock()
   }, [])
 
@@ -428,7 +444,9 @@ function App() {
         const sign = v[5] > 0 ? -1 : 1
         const w = ((v[4] << 8) | v[3]) / 10 * sign
         rawWeight.current = w
-        targetWeightRef.current = w - tareOffset.current
+        const adjusted = w - tareOffset.current
+        displayWeightRef.current = adjusted
+        setDisplayWeight(adjusted)
       })
 
       setConnected(true)
@@ -441,8 +459,6 @@ function App() {
   async function tare() {
     // Software tare: immediately zero the display
     tareOffset.current = rawWeight.current
-    targetWeightRef.current = 0
-    currentWeightRef.current = 0
     setDisplayWeight(0)
     // Hardware tare: scale resets its own zero point
     if (commandChar.current) {
@@ -458,6 +474,111 @@ function App() {
     setSplitInFives(split)
     setChartData([])
   }
+
+  function saveBrewImage() {
+    const size = 500
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')
+
+    // Background
+    ctx.fillStyle = '#1a1a1a'
+    ctx.fillRect(0, 0, size, size)
+
+    // Chart area
+    const pad = { top: 40, bottom: 80, left: 50, right: 20 }
+    const chartW = size - pad.left - pad.right
+    const chartH = size - pad.top - pad.bottom
+    const maxWeight = goalWeight * 1.1
+    const lastTime = chartData.length > 0 ? chartData[chartData.length - 1].time : TOTAL_BREW_TIME
+    const maxTime = lastTime > TOTAL_BREW_TIME ? lastTime : TOTAL_BREW_TIME
+
+    // Horizontal guide lines
+    const coffeeWeight = goalWeight * 30 / 500
+    const bloomingWeight = coffeeWeight * 2
+    let guideLines = []
+    if (splitInFives) {
+      const step = goalWeight / 5
+      for (let i = 1; i <= 5; i++) {
+        const value = Math.round(step * i)
+        guideLines.push({ value, label: i === 1 ? `${value}g bloom` : `${value}g` })
+      }
+    } else {
+      guideLines.push({ value: Math.round(bloomingWeight), label: `${Math.round(bloomingWeight)}g bloom` })
+      guideLines.push({ value: goalWeight, label: `${goalWeight}g` })
+    }
+
+    ctx.setLineDash([4, 4])
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)'
+    ctx.lineWidth = 1
+    ctx.font = '11px system-ui'
+    ctx.fillStyle = 'rgba(255,255,255,0.4)'
+    guideLines.forEach((line) => {
+      const y = pad.top + chartH - (line.value / maxWeight) * chartH
+      ctx.beginPath()
+      ctx.moveTo(pad.left, y)
+      ctx.lineTo(size - pad.right, y)
+      ctx.stroke()
+      ctx.fillText(line.label, pad.left + 4, y - 4)
+    })
+
+    // Vertical time markers
+    const timeMarkers = [
+      { time: BLOOM_DURATION, label: '0:45' },
+      { time: TOTAL_BREW_TIME, label: '1:45' },
+    ]
+    timeMarkers.forEach((marker) => {
+      const x = pad.left + (marker.time / maxTime) * chartW
+      ctx.beginPath()
+      ctx.moveTo(x, pad.top)
+      ctx.lineTo(x, size - pad.bottom)
+      ctx.stroke()
+      ctx.textAlign = 'right'
+      ctx.fillText(marker.label, x - 3, size - pad.bottom - 4)
+      ctx.textAlign = 'left'
+    })
+
+    // Weight curve
+    ctx.setLineDash([])
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.7)'
+    ctx.lineWidth = 2.5
+    ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
+    if (chartData.length > 0) {
+      ctx.beginPath()
+      chartData.forEach((point, i) => {
+        const x = pad.left + (point.time / maxTime) * chartW
+        const y = pad.top + chartH - (Math.max(0, point.weight) / maxWeight) * chartH
+        if (i === 0) ctx.moveTo(x, y)
+        else ctx.lineTo(x, y)
+      })
+      ctx.stroke()
+    }
+
+    // Text info at bottom
+    // Pour time: last time when weight was still changing
+    let pourTime = 0
+    for (let i = chartData.length - 1; i > 0; i--) {
+      if (Math.abs(chartData[i].weight - chartData[i - 1].weight) > 0.3) {
+        pourTime = Math.round(chartData[i].time / 1000)
+        break
+      }
+    }
+    const totalBrewTime = Math.round(elapsed / 1000)
+    ctx.fillStyle = '#fff'
+    ctx.font = '600 16px system-ui'
+    ctx.fillText(`pour time: ${pourTime}s`, pad.left, size - 35)
+    ctx.fillText(`total brew time: ${totalBrewTime}s`, pad.left, size - 12)
+
+    // Download
+    const link = document.createElement('a')
+    link.download = `brew-${Date.now()}.png`
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+  }
+
+  const showSave = !running && elapsed > 0 && displayWeight >= goalWeight
 
   return (
     <div style={styles.container}>
@@ -491,12 +612,59 @@ function App() {
           <span style={styles.weightValue}>{displayWeight.toFixed(1)}</span>
           <span style={styles.weightUnit}>g</span>
         </div>
+        {/* Flow rate indicator - only after bloom and before reaching target */}
+        {running && elapsed > BLOOM_DURATION && displayWeight < goalWeight && (() => {
+          let idealFlow = 0
+
+          if (splitInFives) {
+            // Fifths mode: bloom is 1st fifth (0-45s), then pour each remaining 1/5 every 15s
+            // Pours 2-5 happen at: 45s, 60s, 75s, 90s
+            const pourPhase = Math.floor((elapsed - BLOOM_DURATION) / FIFTHS_INTERVAL)
+            const pourTimeInPhase = ((elapsed - BLOOM_DURATION) % FIFTHS_INTERVAL) / 1000
+            const step = goalWeight / 5
+            if (pourPhase < 4 && pourTimeInPhase > 0) {
+              // Each pour: deliver 1/5 of goal weight within 15 seconds
+              idealFlow = step / (FIFTHS_INTERVAL / 1000)
+            }
+          } else {
+            // Normal mode: pour everything from bloom weight to target in remaining time (45s to 1:45)
+            const bloomWeight = chartData.find((p) => p.time >= BLOOM_DURATION)?.weight || 0
+            const remainingWeight = goalWeight - bloomWeight
+            const remainingTime = (TOTAL_BREW_TIME - BLOOM_DURATION) / 1000
+            idealFlow = remainingTime > 0 ? remainingWeight / remainingTime : 0
+          }
+
+          const diff = flowRate - idealFlow
+          let arrow = '●'
+          let color = '#4ade80'
+          if (idealFlow > 0 && flowRate < 0.1) {
+            arrow = '▲'
+            color = '#facc15'
+          } else if (diff > FLOW_TOLERANCE) {
+            arrow = '▼'
+            color = '#facc15'
+          } else if (diff < -FLOW_TOLERANCE) {
+            arrow = '▲'
+            color = '#facc15'
+          }
+          return (
+            <div style={styles.flowRate}>
+              <span style={{ color }}>{arrow}</span>
+              {' '}{flowRate.toFixed(1)} ml/s
+            </div>
+          )
+        })()}
       </div>
 
       {/* Timer section - 1/4 */}
       <div style={styles.timerSection} onClick={handleTimerClick}>
-        <div style={styles.timerDisplay}>
-          {formatTime(elapsed)}
+        <div style={{ textAlign: 'center' }}>
+          <div style={styles.timerDisplay}>
+            {formatTime(elapsed)}
+          </div>
+          {running && elapsed <= BLOOM_DURATION && (
+            <div style={styles.phaseLabel}>bloom</div>
+          )}
         </div>
         {showTimerReset && (
           <button onClick={(e) => { e.stopPropagation(); resetTimer() }} style={styles.timerResetBtn}>
@@ -522,6 +690,16 @@ function App() {
           {running ? 'Stop' : 'Start'}
         </button>
       </div>
+
+      {/* Save button */}
+      {showSave && (
+        <div style={styles.saveBar}>
+          <button onClick={saveBrewImage} style={styles.saveBtn}>
+            <i className="fa-solid fa-download" style={{ marginRight: '0.5em' }} />
+            Save Brew
+          </button>
+        </div>
+      )}
 
       {/* Target weight modal */}
       {showModal && (
@@ -594,6 +772,19 @@ const styles = {
     marginLeft: '0.3em',
     color: '#888',
   },
+  flowRate: {
+    fontSize: '0.9rem',
+    color: '#888',
+    marginTop: '0.5rem',
+    position: 'relative',
+    zIndex: 1,
+  },
+  phaseLabel: {
+    fontSize: '0.85rem',
+    color: '#666',
+    marginTop: '0.25rem',
+    letterSpacing: '0.05em',
+  },
   timerSection: {
     flex: 1,
     display: 'flex',
@@ -637,6 +828,21 @@ const styles = {
     border: 'none',
     borderRadius: '12px',
     background: '#333',
+    color: '#fff',
+    cursor: 'pointer',
+  },
+  saveBar: {
+    display: 'flex',
+    justifyContent: 'center',
+    padding: '0 1.5rem 1.5rem',
+  },
+  saveBtn: {
+    padding: '0.75rem 2rem',
+    fontSize: '1rem',
+    fontWeight: 600,
+    border: 'none',
+    borderRadius: '12px',
+    background: '#3b82f6',
     color: '#fff',
     cursor: 'pointer',
   },
